@@ -1,0 +1,18 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.joseetoon.emfplayeranimatorbridge.mixin",
+  "refmap": "${mod_id}.refmap.json",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": [
+    "AnimationStackAccessor",
+    "ModelPartAccessor"
+  ],
+  "client": [
+    "client.LivingEntityRendererPauseMixin",
+    "client.LivingEntityRendererResumeMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
