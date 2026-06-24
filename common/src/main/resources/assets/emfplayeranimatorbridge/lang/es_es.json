@@ -1,0 +1,7 @@
+{
+  "emfplayeranimatorbridge.config.enable_bridge": "Activar Bridge",
+  "emfplayeranimatorbridge.config.debug_logging": "Logs de Depuracion",
+  "emfplayeranimatorbridge.config.real_camera_first_person_fix": "Fix de Real Camera en Primera Persona",
+  "emfplayeranimatorbridge.config.emf_pause_cooldown_ticks": "Cooldown de Retencion Transitoria (Ticks)",
+  "emfplayeranimatorbridge.config.release_blend_start_ticks": "Corte Temprano del Release Blend (Ticks)"
+}

@@ -2,6 +2,8 @@ package com.joseetoon.emfplayeranimatorbridge.compat;
 
 import com.joseetoon.emfplayeranimatorbridge.BridgeConfig;
 import com.joseetoon.emfplayeranimatorbridge.Constants;
+import com.joseetoon.emfplayeranimatorbridge.api.HumanoidBodyPose;
+import com.joseetoon.emfplayeranimatorbridge.api.HumanoidModelAccess;
 import com.joseetoon.emfplayeranimatorbridge.anim.BridgeBodyPart;
 import com.joseetoon.emfplayeranimatorbridge.anim.PlayerAnimatorStateHelper;
 import com.joseetoon.emfplayeranimatorbridge.anim.PlayerAnimatorStateHelper.AnimationState;
@@ -22,16 +24,20 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 public final class EmfAnimationBridge {
+    private static final int RELEASE_BLEND_DURATION_TICKS = 4;
 
     private static final Set<UUID> LOCKED_VANILLA = new HashSet<>();
     private static final Set<UUID> PART_PAUSED = new HashSet<>();
     private static final Map<UUID, Long> LAST_REAL_EMOTE_TICK = new HashMap<>();
+    private static final Map<UUID, HumanoidBodyPose> LAST_EMOTE_POSES = new HashMap<>();
+    private static final Map<UUID, ReleaseBlendState> ACTIVE_RELEASE_BLENDS = new HashMap<>();
     private static final Map<UUID, String> LAST_ACTIVE_SIGNATURES = new HashMap<>();
     private static final Map<UUID, String> DIAGNOSTIC_STATES = new HashMap<>();
     private static final Map<UUID, String> COMPAT_DECISIONS = new HashMap<>();
@@ -45,8 +51,13 @@ public final class EmfAnimationBridge {
         return RenderSkipState.consume();
     }
 
+    public static void applyReleaseBlendToEmfPartIfArmed(ModelPart modelPart) {
+        EmfReleaseBlendRenderState.applyIfArmed(modelPart);
+    }
+
     public static void preRenderToBuffer(LivingEntity entity, EntityModel<?> model, float tickDelta) {
         RenderSkipState.clear();
+        EmfReleaseBlendRenderState.clear();
 
         if (!BridgeConfig.isBridgeEnabled()) {
             clearAllState(entity);
@@ -55,15 +66,19 @@ public final class EmfAnimationBridge {
 
         long currentTick = entity.level().getGameTime();
         UUID entityId = entity.getUUID();
+        HumanoidBodyPose currentHumanoidPose = captureHumanoidPose(model);
+        HumanoidBodyPose capturedVanillaPose = VanillaPoseTracker.get(model);
         boolean realCameraCompatEligible = isRealCameraCompatEligible(entity);
         RealCameraRenderPhase realCameraPhase = realCameraCompatEligible
                 ? RealCameraRenderPhaseTracker.currentPhase()
                 : RealCameraRenderPhase.NONE;
         boolean realCameraCompatRender = realCameraCompatEligible && realCameraPhase != RealCameraRenderPhase.NONE;
+        boolean releaseBlendTracked = ACTIVE_RELEASE_BLENDS.containsKey(entityId);
 
         if (realCameraCompatRender) {
             logCompatDecision(entity, "compat_phase:" + realCameraPhase.debugName());
-            if (REAL_CAMERA_COMPAT_STATE.isRepeatedCompatRender(entityId, currentTick, realCameraPhase)) {
+            if (REAL_CAMERA_COMPAT_STATE.isRepeatedCompatRender(entityId, currentTick, realCameraPhase)
+                    && !releaseBlendTracked) {
                 if (REAL_CAMERA_COMPAT_STATE.wasSkipEligible(entityId)) {
                     RenderSkipState.arm();
                     logCompatDecision(entity, "skip_main_render:armed_repeated:" + realCameraPhase.debugName());
@@ -79,17 +94,34 @@ public final class EmfAnimationBridge {
 
         AnimationState state = PlayerAnimatorStateHelper.inspect(entity);
         boolean emfAnimatedModel = EMFAnimationApi.isModelAnimatedByEMF(model);
+        EmfHumanoidBlendTargets emfBlendTargets = emfAnimatedModel ? resolveEmfBlendTargets(model) : null;
+        boolean releaseBlendSupported = currentHumanoidPose != null && !BridgeConfig.isEmfPerPartPauseEnabled();
+        OptionalInt remainingRelevantTicks = state.hasRelevantAnimation()
+                ? PlayerAnimatorStateHelper.getFiniteRelevantRemainingTicks(entity)
+                : OptionalInt.empty();
+        boolean withinEarlyReleaseWindow = releaseBlendSupported
+                && BridgeConfig.getReleaseBlendStartTicks() > 0
+                && remainingRelevantTicks.isPresent()
+                && remainingRelevantTicks.getAsInt() <= BridgeConfig.getReleaseBlendStartTicks();
+        boolean canStartEarlyEmfReleaseBlend = withinEarlyReleaseWindow && emfBlendTargets != null;
 
         if (state.hasRelevantAnimation()) {
             LAST_REAL_EMOTE_TICK.put(entityId, currentTick);
+            if (releaseBlendTracked && !withinEarlyReleaseWindow) {
+                clearReleaseBlendTracking(entityId);
+            }
+            if (releaseBlendSupported && !withinEarlyReleaseWindow) {
+                LAST_EMOTE_POSES.put(entityId, currentHumanoidPose);
+            }
         }
 
         boolean withinCooldown = isWithinCooldown(entityId, currentTick);
-        boolean shouldHold = state.hasRelevantAnimation() || withinCooldown;
+        boolean shouldHold = BridgeHoldPolicy.shouldHold(state, withinCooldown);
+        boolean releaseBlendActive = false;
 
         if (!emfAnimatedModel) {
-            if (RealCameraCompatState.shouldPreserveBridgeStateOnNonEmfRender(shouldHold)) {
-                REAL_CAMERA_COMPAT_STATE.setEmoteActive(entityId, state.hasRelevantAnimation());
+            if (RealCameraCompatState.shouldPreserveBridgeStateOnNonEmfRender(shouldHold || releaseBlendTracked)) {
+                REAL_CAMERA_COMPAT_STATE.setEmoteActive(entityId, state.hasRelevantAnimation() || releaseBlendTracked);
                 REAL_CAMERA_COMPAT_STATE.setSkipEligible(entityId, false);
                 if (realCameraCompatRender && realCameraPhase == RealCameraRenderPhase.REAL_CAMERA_BIND_CAPTURE) {
                     logCompatDecision(entity, "skip_main_render:suppressed_non_emf_bind_capture");
@@ -102,7 +134,32 @@ public final class EmfAnimationBridge {
             return;
         }
 
-        if (!shouldHold) {
+        if (shouldStartReleaseBlend(entityId, state, releaseBlendSupported, canStartEarlyEmfReleaseBlend)) {
+            ACTIVE_RELEASE_BLENDS.put(entityId, createReleaseBlendState(
+                    entityId,
+                    currentTick,
+                    canStartEarlyEmfReleaseBlend,
+                    remainingRelevantTicks
+            ));
+            releaseBlendTracked = true;
+        }
+
+        if (releaseBlendSupported) {
+            releaseBlendActive = applyReleaseBlendIfActive(
+                    entity,
+                    model,
+                    (HumanoidModelAccess) model,
+                    emfBlendTargets,
+                    ReleaseBlendTargetResolver.resolve(capturedVanillaPose, currentHumanoidPose),
+                    currentTick
+            );
+            releaseBlendTracked = releaseBlendActive;
+        } else if (releaseBlendTracked) {
+            clearReleaseBlendTracking(entityId);
+            releaseBlendTracked = false;
+        }
+
+        if (!shouldHold && !releaseBlendActive) {
             REAL_CAMERA_COMPAT_STATE.setEmoteActive(entityId, false);
             REAL_CAMERA_COMPAT_STATE.setSkipEligible(entityId, false);
             if (PART_PAUSED.remove(entityId)) {
@@ -119,15 +176,15 @@ public final class EmfAnimationBridge {
 
         if (BridgeConfig.isEmfPerPartPauseEnabled()) {
             applyPerPartPause(entity, model, state);
-        } else {
+        } else if (!releaseBlendActive) {
             applyVanillaLock(entity, model, state);
         }
 
         boolean shouldSkipMainRender = realCameraCompatRender
                 && realCameraPhase == RealCameraRenderPhase.REAL_CAMERA_BODY_RENDER
-                && state.hasRelevantAnimation()
+                && (state.hasRelevantAnimation() || releaseBlendActive)
                 && willEmfRenderVanillaRoot(entity);
-        REAL_CAMERA_COMPAT_STATE.setEmoteActive(entityId, state.hasRelevantAnimation());
+        REAL_CAMERA_COMPAT_STATE.setEmoteActive(entityId, state.hasRelevantAnimation() || releaseBlendActive);
         REAL_CAMERA_COMPAT_STATE.setSkipEligible(entityId, shouldSkipMainRender);
         if (shouldSkipMainRender) {
             RenderSkipState.arm();
@@ -139,10 +196,14 @@ public final class EmfAnimationBridge {
 
     public static void postRenderToBuffer(LivingEntity entity, EntityModel<?> model) {
         RenderSkipState.clear();
+        EmfReleaseBlendRenderState.clear();
 
         long currentTick = entity.level().getGameTime();
         UUID entityId = entity.getUUID();
         int cooldown = BridgeConfig.getEmfPauseCooldownTicks();
+        if (isReleaseBlendActive(entityId, currentTick)) {
+            return;
+        }
 
         if (LOCKED_VANILLA.contains(entityId)) {
             long lastReal = LAST_REAL_EMOTE_TICK.getOrDefault(entityId, Long.MIN_VALUE);
@@ -213,6 +274,79 @@ public final class EmfAnimationBridge {
         return last != null && currentTick - last <= cooldown;
     }
 
+    private static boolean shouldStartReleaseBlend(UUID entityId, AnimationState state, boolean releaseBlendSupported,
+                                                   boolean withinEarlyReleaseWindow) {
+        if (!releaseBlendSupported || ACTIVE_RELEASE_BLENDS.containsKey(entityId) || !LOCKED_VANILLA.contains(entityId)) {
+            return false;
+        }
+        if (!LAST_EMOTE_POSES.containsKey(entityId)) {
+            return false;
+        }
+        if (withinEarlyReleaseWindow) {
+            return true;
+        }
+        return switch (state.reason()) {
+            case NOT_ANIMATED, STACK_INACTIVE -> true;
+            case ONLY_BLANK_LOOP, NO_ENABLED_PARTS, HAS_RELEVANT_ANIMATION -> false;
+        };
+    }
+
+    private static ReleaseBlendState createReleaseBlendState(UUID entityId, long currentTick,
+                                                             boolean withinEarlyReleaseWindow,
+                                                             OptionalInt remainingRelevantTicks) {
+        HumanoidBodyPose startPose = LAST_EMOTE_POSES.get(entityId);
+        if (withinEarlyReleaseWindow && remainingRelevantTicks.isPresent()) {
+            return ReleaseBlendState.forStopTick(startPose, currentTick, currentTick + remainingRelevantTicks.getAsInt());
+        }
+        return ReleaseBlendState.forDuration(startPose, currentTick, RELEASE_BLEND_DURATION_TICKS);
+    }
+
+    private static boolean applyReleaseBlendIfActive(LivingEntity entity, EntityModel<?> model,
+                                                     HumanoidModelAccess modelAccess,
+                                                     @Nullable EmfHumanoidBlendTargets emfBlendTargets,
+                                                     @Nullable HumanoidBodyPose targetPose, long currentTick) {
+        UUID entityId = entity.getUUID();
+        ReleaseBlendState state = ACTIVE_RELEASE_BLENDS.get(entityId);
+        if (state == null) {
+            return false;
+        }
+        if (!state.isActive(currentTick)) {
+            clearReleaseBlendTracking(entityId);
+            clearEmfCompatState(entity);
+            return false;
+        }
+
+        float blendAlpha = state.blendAlpha(currentTick);
+        if (emfBlendTargets != null) {
+            if (PART_PAUSED.remove(entityId)) {
+                EMFAnimationApi.resumeAllCustomAnimationsForEntity(EMFAnimationApi.emfEntityOf(entity));
+            }
+            if (LOCKED_VANILLA.remove(entityId)) {
+                EMFAnimationApi.unlockEntityToVanillaModel(EMFAnimationApi.emfEntityOf(entity));
+            }
+            EmfReleaseBlendRenderState.arm(emfBlendTargets, state.startPose(), blendAlpha);
+            logDiagnosticState(entity, "release_blend:emf:" + model.getClass().getName());
+            return true;
+        }
+
+        if (targetPose == null) {
+            return false;
+        }
+
+        if (LOCKED_VANILLA.add(entityId)) {
+            EMFAnimationApi.lockEntityToVanillaModel(EMFAnimationApi.emfEntityOf(entity));
+        }
+        HumanoidBodyPose.interpolate(state.startPose(), targetPose, blendAlpha)
+                .applyTo(modelAccess);
+        logDiagnosticState(entity, "release_blend:vanilla:" + model.getClass().getName());
+        return true;
+    }
+
+    private static boolean isReleaseBlendActive(UUID entityId, long currentTick) {
+        ReleaseBlendState state = ACTIVE_RELEASE_BLENDS.get(entityId);
+        return state != null && state.isActive(currentTick);
+    }
+
     private static boolean isRealCameraCompatEligible(LivingEntity entity) {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft == null || minecraft.options == null || minecraft.player == null) {
@@ -265,8 +399,10 @@ public final class EmfAnimationBridge {
         UUID entityId = entity.getUUID();
         clearEmfCompatState(entity);
         LAST_REAL_EMOTE_TICK.remove(entityId);
+        clearReleaseBlendTracking(entityId);
         REAL_CAMERA_COMPAT_STATE.clearTracking(entityId);
         RenderSkipState.clear();
+        EmfReleaseBlendRenderState.clear();
         clearActiveSignature(entity);
         clearDiagnosticState(entity);
         clearCompatDecision(entity);
@@ -281,6 +417,31 @@ public final class EmfAnimationBridge {
             EMFAnimationApi.unlockEntityToVanillaModel(EMFAnimationApi.emfEntityOf(entity));
         }
         clearActiveSignature(entity);
+    }
+
+    @Nullable
+    private static HumanoidBodyPose captureHumanoidPose(EntityModel<?> model) {
+        if (model instanceof HumanoidModelAccess modelAccess) {
+            return HumanoidBodyPose.capture(modelAccess);
+        }
+        return null;
+    }
+
+    private static void clearReleaseBlendTracking(UUID entityId) {
+        ACTIVE_RELEASE_BLENDS.remove(entityId);
+        LAST_EMOTE_POSES.remove(entityId);
+    }
+
+    @Nullable
+    private static EmfHumanoidBlendTargets resolveEmfBlendTargets(EntityModel<?> model) {
+        if (!(model instanceof IEMFModel emfModel) || !emfModel.emf$isEMFModel()) {
+            return null;
+        }
+        EMFModelPartRoot emfRoot = emfModel.emf$getEMFRootModel();
+        if (emfRoot == null) {
+            return null;
+        }
+        return EmfHumanoidBlendTargetResolver.resolve(model, emfRoot);
     }
 
     private static Collection<ModelPart> getModelPartsToPause(EntityModel<?> model, Set<BridgeBodyPart> activeParts) {

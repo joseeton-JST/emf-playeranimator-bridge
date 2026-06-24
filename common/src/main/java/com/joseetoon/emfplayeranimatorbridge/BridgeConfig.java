@@ -5,6 +5,7 @@ public final class BridgeConfig {
     private static volatile boolean debugLogging = false;
     private static volatile boolean emfPerPartPause = false;
     private static volatile int emfPauseCooldownTicks = 5;
+    private static volatile int releaseBlendStartTicks = 4;
     private static volatile boolean realCameraFirstPersonFix = true;
 
     private BridgeConfig() {
@@ -26,6 +27,10 @@ public final class BridgeConfig {
         return Math.max(0, emfPauseCooldownTicks);
     }
 
+    public static int getReleaseBlendStartTicks() {
+        return Math.max(0, releaseBlendStartTicks);
+    }
+
     public static boolean isRealCameraFirstPersonFixEnabled() {
         return realCameraFirstPersonFix;
     }
@@ -36,11 +41,12 @@ public final class BridgeConfig {
     }
 
     public static void update(boolean bridgeEnabled, boolean debugEnabled, boolean perPartPause, int cooldownTicks,
-                              boolean realCameraFixEnabled) {
+                              int releaseBlendStartTickCount, boolean realCameraFixEnabled) {
         enableBridge = bridgeEnabled;
         debugLogging = debugEnabled;
         emfPerPartPause = perPartPause;
         emfPauseCooldownTicks = cooldownTicks;
+        releaseBlendStartTicks = releaseBlendStartTickCount;
         realCameraFirstPersonFix = realCameraFixEnabled;
     }
 }

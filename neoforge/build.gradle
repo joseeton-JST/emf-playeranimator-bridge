@@ -1,0 +1,82 @@
+plugins {
+    id 'idea'
+    id 'maven-publish'
+    id 'net.neoforged.moddev'
+}
+base {
+    archivesName = "${mod_id}-neoforge-${minecraft_version}"
+}
+
+neoForge {
+    version = neo_version
+
+    runs {
+        client {
+            client()
+            gameDirectory = project.file('run')
+            ideName = "${mod_name} NeoForge Client"
+        }
+
+        server {
+            server()
+            gameDirectory = project.file('run')
+            ideName = "${mod_name} NeoForge Server"
+            programArgument '--nogui'
+        }
+    }
+
+    mods {
+        create(mod_id) {
+            sourceSet(sourceSets.main)
+        }
+    }
+}
+
+repositories {
+    maven { url 'https://maven.kosmx.dev/' }
+    maven { url = "https://api.modrinth.com/maven" }
+}
+
+dependencies {
+    compileOnly project(":common")
+
+    implementation "dev.kosmx.player-anim:player-animation-lib-forge:${project.player_anim_version}"
+    compileOnly "maven.modrinth:entity-model-features:${project.emf_version}"
+    runtimeOnly "maven.modrinth:entity-model-features:${project.emf_version}"
+    runtimeOnly "maven.modrinth:entitytexturefeatures:${project.etf_version}"
+}
+
+tasks.named("compileJava", JavaCompile) {
+    source(project(":common").sourceSets.main.allSource)
+}
+
+tasks.named("javadoc", Javadoc) {
+    source(project(":common").sourceSets.main.allJava)
+    configure(options) {
+        tags(
+                'apiNote:a:"API Note:"',
+                'implNote:a:"Implementation Note:"'
+        )
+    }
+}
+tasks.named("sourcesJar", Jar) {
+    from(project(":common").sourceSets.main.allSource)
+}
+
+processResources {
+    from project(":common").sourceSets.main.resources
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            artifactId base.archivesName.get()
+            from components.java
+        }
+    }
+    repositories {
+        maven {
+            url "file://" + System.getenv("local_maven")
+        }
+    }
+}

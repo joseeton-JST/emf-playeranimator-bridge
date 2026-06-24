@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.function.Consumer;
 
@@ -33,7 +34,7 @@ public final class PlayerAnimatorStateHelper {
     }
 
     private static final Set<ResourceLocation> IGNORED_ANIMATION_IDS = Set.of(
-            new ResourceLocation("seriousplayeranimations", "blank_loop")
+            ResourceLocation.fromNamespaceAndPath("seriousplayeranimations", "blank_loop")
     );
 
     private PlayerAnimatorStateHelper() {
@@ -108,6 +109,60 @@ public final class PlayerAnimatorStateHelper {
         IgnoreReason reason = resolveReason(animation, hasNonIgnoredKeyframe[0], hasEnabledParts[0]);
         Set<BridgeBodyPart> immutableParts = activeParts.isEmpty() ? Set.of() : Collections.unmodifiableSet(activeParts);
         return new AnimationState(hasRelevantAnimation[0], immutableParts, reason);
+    }
+
+    public static boolean isWithinFinalTicksWindow(LivingEntity entity, int remainingTicksThreshold) {
+        if (remainingTicksThreshold <= 0) {
+            return false;
+        }
+        if (!(entity instanceof IAnimatedPlayer animatedPlayer)) {
+            return false;
+        }
+        return isWithinFinalTicksWindow(animatedPlayer.getAnimationStack(), remainingTicksThreshold);
+    }
+
+    public static boolean isWithinFinalTicksWindow(@Nullable IAnimation animation, int remainingTicksThreshold) {
+        if (animation == null || remainingTicksThreshold <= 0) {
+            return false;
+        }
+
+        return getFiniteRelevantRemainingTicks(animation)
+                .stream()
+                .anyMatch(remainingTicks -> remainingTicks <= remainingTicksThreshold);
+    }
+
+    public static OptionalInt getFiniteRelevantRemainingTicks(LivingEntity entity) {
+        if (!(entity instanceof IAnimatedPlayer animatedPlayer)) {
+            return OptionalInt.empty();
+        }
+        return getFiniteRelevantRemainingTicks(animatedPlayer.getAnimationStack());
+    }
+
+    public static OptionalInt getFiniteRelevantRemainingTicks(@Nullable IAnimation animation) {
+        if (animation == null) {
+            return OptionalInt.empty();
+        }
+
+        int[] bestRemainingTicks = {Integer.MAX_VALUE};
+        consumeAnimations(animation, keyframePlayer -> {
+            if (!keyframePlayer.isActive() || keyframePlayer.isInfinite() || isIgnoredAnimation(keyframePlayer)) {
+                return;
+            }
+
+            int remainingTicks = keyframePlayer.getStopTick() - keyframePlayer.getCurrentTick();
+            if (remainingTicks < 0) {
+                return;
+            }
+
+            boolean[] hasEnabledParts = new boolean[1];
+            addActiveParts(keyframePlayer, EnumSet.noneOf(BridgeBodyPart.class), hasEnabledParts);
+            if (hasEnabledParts[0]) {
+                bestRemainingTicks[0] = Math.min(bestRemainingTicks[0], remainingTicks);
+            }
+        });
+        return bestRemainingTicks[0] == Integer.MAX_VALUE
+                ? OptionalInt.empty()
+                : OptionalInt.of(bestRemainingTicks[0]);
     }
 
     private static IgnoreReason resolveReason(@Nullable IAnimation animation,

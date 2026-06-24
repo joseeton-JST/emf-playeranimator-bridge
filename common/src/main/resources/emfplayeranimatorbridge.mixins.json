@@ -2,15 +2,18 @@
   "required": true,
   "minVersion": "0.8",
   "package": "com.joseetoon.emfplayeranimatorbridge.mixin",
-  "refmap": "${mod_id}.refmap.json",
-  "compatibilityLevel": "JAVA_17",
+  "compatibilityLevel": "JAVA_21",
   "mixins": [
     "AnimationStackAccessor",
     "ModelPartAccessor"
   ],
   "client": [
+    "client.HumanoidModelAccessMixin",
+    "client.IllagerModelAccessMixin",
     "client.LivingEntityRendererPauseMixin",
     "client.LivingEntityRendererResumeMixin",
+    "client.PlayerModelVanillaPoseCaptureMixin",
+    "client.emf.EMFModelPartWithStateReleaseBlendMixin",
     "client.realcamera.RealCameraBindCaptureMixin",
     "client.realcamera.RealCameraBodyRenderMixin"
   ],
