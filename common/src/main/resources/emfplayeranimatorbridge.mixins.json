@@ -10,7 +10,9 @@
   ],
   "client": [
     "client.LivingEntityRendererPauseMixin",
-    "client.LivingEntityRendererResumeMixin"
+    "client.LivingEntityRendererResumeMixin",
+    "client.realcamera.RealCameraBindCaptureMixin",
+    "client.realcamera.RealCameraBodyRenderMixin"
   ],
   "injectors": {
     "defaultRequire": 1

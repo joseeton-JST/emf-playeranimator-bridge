@@ -26,7 +26,7 @@ public abstract class LivingEntityRendererResumeMixin<
     }
 
     @Inject(
-            method = "m_7392_",
+            method = "render(Lnet/minecraft/world/entity/LivingEntity;FFLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;I)V",
             at = @At("TAIL")
     )
     protected void emfplayeranimatorbridge$postRenderToBuffer(T entity, float entityYaw, float tickDelta, PoseStack poseStack,
